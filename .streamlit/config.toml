@@ -1,6 +1,6 @@
 [server]
-port = 8501
-address = "0.0.0.0"
+port = 5003
+address = "172.16.100.136"
 enableCORS = false
 enableXsrfProtection = true
 
