@@ -176,27 +176,24 @@ def delete_question(question_id):
 with st.sidebar:
     st.header("📚 База знаний")
     
-    # Компактный поиск
-    search_col1, search_col2 = st.columns([3, 1])
-    with search_col1:
-        search_text = st.text_input(
-            "🔍 Поиск", 
-            placeholder="Запрос...",
-            value=st.session_state.get("search_text", ""),
-            key="search_input",
-            label_visibility="collapsed"
-        )
-    with search_col2:
-        search_disabled = not search_text.strip()
-        if st.button("Найти", disabled=search_disabled, use_container_width=True):
-            if search_text:
-                st.session_state["search_mode"] = True
-                st.session_state["search_text"] = search_text
-                st.rerun()
+    # Поиск
+    search_text = st.text_input(
+        "🔍 Поиск", 
+        placeholder="Введите запрос...",
+        value=st.session_state.get("search_text", ""),
+        key="search_input"
+    )
+    
+    # Кнопка "Найти" под полем ввода
+    if st.button("Найти", disabled=not search_text.strip(), key="search_button"):
+        if search_text:
+            st.session_state["search_mode"] = True
+            st.session_state["search_text"] = search_text
+            st.rerun()
     
     # Кнопка очистки если есть активный поиск
     if st.session_state.get("search_mode"):
-        if st.button("✕ Очистить поиск", use_container_width=True):
+        if st.button("Очистить поиск", use_container_width=True):
             del st.session_state["search_mode"]
             if "search_text" in st.session_state:
                 del st.session_state["search_text"]
@@ -204,23 +201,21 @@ with st.sidebar:
     
     st.write("---")
     
-    # Компактная панель админа
+    # Панель админа
     if not st.session_state.admin_logged_in:
-        password = st.text_input("Пароль админа", type="password", label_visibility="collapsed", placeholder="Пароль...")
-        if st.button("Войти как админ", use_container_width=True):
+        password = st.text_input("Пароль админа", type="password")
+        if st.button("Войти как админ"):
             if hash_password(password) == ADMIN_PASSWORD_HASH:
                 st.session_state.admin_logged_in = True
                 st.rerun()
-            else:
-                st.error("Неверный пароль")
     else:
         st.success("✅ Админ")
-        if st.button("Выйти", use_container_width=True):
+        if st.button("Выйти"):
             st.session_state.admin_logged_in = False
             st.rerun()
     
     st.write("---")
-    st.markdown("**📂 Разделы**")
+    st.subheader("📂 Разделы")
     
     # Получаем список разделов
     sections_df = get_sections()
