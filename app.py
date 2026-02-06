@@ -3,10 +3,20 @@ import sqlite3
 import pandas as pd
 from datetime import datetime, timedelta
 import hashlib
+from contextlib import contextmanager
 
 # Настройка
 ADMIN_PASSWORD = "admin123"  # Измени на свой пароль
 DB_FILE = "knowledge.db"
+
+# Контекстный менеджер для работы с БД
+@contextmanager
+def get_db_connection():
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 # Хэширование пароля для сравнения
 def hash_password(password):
@@ -20,10 +30,8 @@ def format_datetime(timestamp):
     try:
         # Предполагаем, что время в UTC (как хранит SQLite)
         utc_dt = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
-        
         # Добавляем 3 часа для московского времени
         moscow_dt = utc_dt + timedelta(hours=3)
-        
         # Форматируем для вывода
         return moscow_dt.strftime('%d.%m.%Y %H:%M')
     except:
@@ -40,202 +48,201 @@ st.set_page_config(
 if 'admin_logged_in' not in st.session_state:
     st.session_state.admin_logged_in = False
 
-# Сохраняем состояние поиска при обновлении
-if "search_text" in st.session_state:
-    if "search_mode" not in st.session_state:
-        st.session_state["search_mode"] = True
-
 # Создание базы данных
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS sections
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  title TEXT NOT NULL,
-                  description TEXT,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS questions
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  section_id INTEGER,
-                  question TEXT NOT NULL,
-                  answer TEXT,
-                  info TEXT,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  FOREIGN KEY (section_id) REFERENCES sections (id))''')
-    
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS sections
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      title TEXT NOT NULL,
+                      description TEXT,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS questions
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      section_id INTEGER,
+                      question TEXT NOT NULL,
+                      answer TEXT,
+                      info TEXT,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      FOREIGN KEY (section_id) REFERENCES sections (id))''')
+        conn.commit()
 
 init_db()
 
 # Функции для работы с БД
+@st.cache_data(ttl=300)  # Кэшируем на 5 минут
 def get_sections():
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql("SELECT * FROM sections ORDER BY title", conn)
-    conn.close()
-    return df
+    with get_db_connection() as conn:
+        return pd.read_sql("SELECT * FROM sections ORDER BY title", conn)
 
 def get_questions(section_id):
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql(f"SELECT * FROM questions WHERE section_id = {section_id} ORDER BY id", conn)
-    conn.close()
-    return df
+    with get_db_connection() as conn:
+        return pd.read_sql("SELECT * FROM questions WHERE section_id = ? ORDER BY id", 
+                          conn, params=(section_id,))
 
 def search_questions(search_text):
-    conn = sqlite3.connect(DB_FILE)
-    query = f"""
-    SELECT q.*, s.title as section_title 
-    FROM questions q
-    JOIN sections s ON q.section_id = s.id
-    WHERE q.question LIKE '%{search_text}%' 
-       OR q.answer LIKE '%{search_text}%'
-       OR q.info LIKE '%{search_text}%'
-    ORDER BY s.title, q.id
-    """
-    df = pd.read_sql(query, conn)
-    conn.close()
-    return df
+    with get_db_connection() as conn:
+        query = """
+        SELECT q.*, s.title as section_title 
+        FROM questions q
+        JOIN sections s ON q.section_id = s.id
+        WHERE q.question LIKE ? 
+           OR q.answer LIKE ?
+           OR q.info LIKE ?
+        ORDER BY s.title, q.id
+        """
+        search_param = f"%{search_text}%"
+        return pd.read_sql(query, conn, params=(search_param, search_param, search_param))
 
+@st.cache_data(ttl=300)
 def get_recent_sections(limit=5):
-    conn = sqlite3.connect(DB_FILE)
-    query = f"SELECT * FROM sections ORDER BY created_at DESC LIMIT {limit}"
-    df = pd.read_sql(query, conn)
-    conn.close()
-    return df
+    with get_db_connection() as conn:
+        return pd.read_sql(f"SELECT * FROM sections ORDER BY created_at DESC LIMIT {limit}", conn)
 
+@st.cache_data(ttl=300)
 def get_recent_questions(limit=5):
-    conn = sqlite3.connect(DB_FILE)
-    query = f"""
-    SELECT q.*, s.title as section_title 
-    FROM questions q
-    JOIN sections s ON q.section_id = s.id
-    ORDER BY q.created_at DESC 
-    LIMIT {limit}
-    """
-    df = pd.read_sql(query, conn)
-    conn.close()
-    return df
+    with get_db_connection() as conn:
+        query = f"""
+        SELECT q.*, s.title as section_title 
+        FROM questions q
+        JOIN sections s ON q.section_id = s.id
+        ORDER BY q.created_at DESC 
+        LIMIT {limit}
+        """
+        return pd.read_sql(query, conn)
 
 def get_total_stats():
-    conn = sqlite3.connect(DB_FILE)
-    sections_count = pd.read_sql("SELECT COUNT(*) as count FROM sections", conn).iloc[0]['count']
-    questions_count = pd.read_sql("SELECT COUNT(*) as count FROM questions", conn).iloc[0]['count']
-    conn.close()
-    return sections_count, questions_count
+    with get_db_connection() as conn:
+        sections_count = pd.read_sql("SELECT COUNT(*) as count FROM sections", conn).iloc[0]['count']
+        questions_count = pd.read_sql("SELECT COUNT(*) as count FROM questions", conn).iloc[0]['count']
+        return sections_count, questions_count
 
 def add_section(title, description):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT INTO sections (title, description) VALUES (?, ?)", 
-              (title, description))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("INSERT INTO sections (title, description) VALUES (?, ?)", 
+                  (title, description))
+        conn.commit()
 
 def add_question(section_id, question, answer, info):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT INTO questions (section_id, question, answer, info) VALUES (?, ?, ?, ?)",
-              (section_id, question, answer, info))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("INSERT INTO questions (section_id, question, answer, info) VALUES (?, ?, ?, ?)",
+                  (section_id, question, answer, info))
+        conn.commit()
 
 def update_question(question_id, question, answer, info):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("UPDATE questions SET question = ?, answer = ?, info = ? WHERE id = ?",
-              (question, answer, info, question_id))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE questions SET question = ?, answer = ?, info = ? WHERE id = ?",
+                  (question, answer, info, question_id))
+        conn.commit()
 
 def update_section(section_id, title, description):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("UPDATE sections SET title = ?, description = ? WHERE id = ?",
-              (title, description, section_id))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("UPDATE sections SET title = ?, description = ? WHERE id = ?",
+                  (title, description, section_id))
+        conn.commit()
 
 def delete_section(section_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("DELETE FROM sections WHERE id = ?", (section_id,))
-    c.execute("DELETE FROM questions WHERE section_id = ?", (section_id,))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM sections WHERE id = ?", (section_id,))
+        c.execute("DELETE FROM questions WHERE section_id = ?", (section_id,))
+        conn.commit()
 
 def delete_question(question_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("DELETE FROM questions WHERE id = ?", (question_id,))
-    conn.commit()
-    conn.close()
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM questions WHERE id = ?", (question_id,))
+        conn.commit()
 
 # ===== БОКОВАЯ ПАНЕЛЬ =====
 with st.sidebar:
     st.header("📚 База знаний")
     
-    # Поиск
-    search_text = st.text_input(
-        "🔍 Поиск", 
-        placeholder="Введите запрос...",
-        value=st.session_state.get("search_text", ""),
-        key="search_input"
-    )
+    # Поиск - УПРОЩЕННАЯ ЛОГИКА
+    search_container = st.container()
     
-    # Кнопка "Найти" под полем ввода
-    if st.button("Найти", disabled=not search_text.strip(), key="search_button"):
-        if search_text:
+    with search_container:
+        search_text = st.text_input(
+            "🔍 Поиск", 
+            placeholder="Введите запрос и нажмите Enter...",
+            value=st.session_state.get("search_text", ""),
+            key="search_input",
+            label_visibility="collapsed"
+        )
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            search_clicked = st.button("Найти", use_container_width=True, key="search_button")
+        with col2:
+            # Кнопка очистки поиска
+            if st.session_state.get("search_mode"):
+                if st.button("✖", use_container_width=True, key="clear_search"):
+                    if "search_mode" in st.session_state:
+                        del st.session_state["search_mode"]
+                    if "search_text" in st.session_state:
+                        del st.session_state["search_text"]
+                    st.rerun()
+    
+    # Обработка поиска - срабатывает при нажатии кнопки ИЛИ при вводе текста и нажатии Enter
+    if search_clicked or (search_text and search_text != st.session_state.get("last_search", "")):
+        if search_text.strip():
             st.session_state["search_mode"] = True
             st.session_state["search_text"] = search_text
+            st.session_state["last_search"] = search_text
             st.rerun()
-    
-    # Кнопка очистки если есть активный поиск
-    if st.session_state.get("search_mode"):
-        if st.button("Очистить поиск", use_container_width=True):
-            del st.session_state["search_mode"]
-            if "search_text" in st.session_state:
-                del st.session_state["search_text"]
-            st.rerun()
+        elif search_clicked:  # Только если нажата кнопка (не Enter)
+            st.warning("Введите текст для поиска")
     
     st.write("---")
     
     # Панель админа
     if not st.session_state.admin_logged_in:
-        password = st.text_input("Пароль админа", type="password")
-        if st.button("Войти как админ"):
-            if hash_password(password) == ADMIN_PASSWORD_HASH:
-                st.session_state.admin_logged_in = True
-                st.rerun()
+        with st.form("admin_login"):
+            password = st.text_input("Пароль админа", type="password")
+            if st.form_submit_button("Войти как админ"):
+                if hash_password(password) == ADMIN_PASSWORD_HASH:
+                    st.session_state.admin_logged_in = True
+                    st.rerun()
+                else:
+                    st.error("Неверный пароль")
     else:
         st.success("✅ Админ")
-        if st.button("Выйти"):
+        if st.button("Выйти", use_container_width=True):
             st.session_state.admin_logged_in = False
             st.rerun()
     
     st.write("---")
     st.subheader("📂 Разделы")
     
+    # Кнопка "Главная"
+    if st.button("🏠 Главная", use_container_width=True, key="main_button"):
+        # Очищаем все состояния связанные с поиском и разделами
+        for key in ["search_mode", "search_text", "current_section", "section_title"]:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.rerun()
+    
     # Получаем список разделов
     sections_df = get_sections()
-    
-    # Кнопка "Главная"
-    if st.button("🏠 Главная", use_container_width=True):
-        if "search_mode" in st.session_state:
-            del st.session_state["search_mode"]
-        if "current_section" in st.session_state:
-            del st.session_state["current_section"]
-        st.rerun()
     
     if not sections_df.empty:
         st.write("---")
         
         # Показываем разделы как кликабельные кнопки
         for _, section in sections_df.iterrows():
-            if st.button(f"📁 {section['title']}", key=f"nav_{section['id']}", use_container_width=True):
+            if st.button(f"📁 {section['title']}", 
+                        use_container_width=True,
+                        key=f"nav_{section['id']}"):
+                # Выходим из режима поиска
                 if "search_mode" in st.session_state:
                     del st.session_state["search_mode"]
+                if "search_text" in st.session_state:
+                    del st.session_state["search_text"]
                 st.session_state["current_section"] = section['id']
                 st.session_state["section_title"] = section['title']
                 st.rerun()
@@ -244,7 +251,7 @@ with st.sidebar:
 
 # ===== ГЛАВНАЯ ОБЛАСТЬ =====
 # Режим поиска
-if "search_mode" in st.session_state and st.session_state.search_mode:
+if st.session_state.get("search_mode"):
     search_text = st.session_state.get("search_text", "")
     
     if st.button("← Назад"):
@@ -282,9 +289,8 @@ elif "current_section" in st.session_state:
     section_title = st.session_state.get("section_title", "")
     
     # Получаем информацию о разделе
-    conn = sqlite3.connect(DB_FILE)
-    section_info = pd.read_sql(f"SELECT * FROM sections WHERE id = {section_id}", conn)
-    conn.close()
+    with get_db_connection() as conn:
+        section_info = pd.read_sql(f"SELECT * FROM sections WHERE id = {section_id}", conn)
     
     if not section_info.empty:
         current_section = section_info.iloc[0]
@@ -297,7 +303,7 @@ elif "current_section" in st.session_state:
                 del st.session_state["section_title"]
             st.rerun()
         
-        # Заголовок раздела с кнопками редактирования для админа
+        # Заголовок раздела
         col_title, col_stats, col_admin = st.columns([3, 1, 1])
         with col_title:
             st.subheader(section_title)
@@ -310,7 +316,7 @@ elif "current_section" in st.session_state:
         # Кнопки редактирования раздела для админа
         if st.session_state.admin_logged_in:
             with col_admin:
-                if st.button("✏️ Редакт. раздел"):
+                if st.button("✏️ Редакт. раздел", use_container_width=True):
                     st.session_state["editing_section"] = section_id
         
         # Форма редактирования раздела
@@ -319,20 +325,20 @@ elif "current_section" in st.session_state:
                 new_title = st.text_input("Название раздела", value=section_title)
                 new_desc = st.text_area("Описание раздела", value=current_desc if current_desc else "")
                 
-                col_save, col_cancel, col_delete = st.columns([1, 1, 1])
+                col_save, col_cancel, col_delete = st.columns(3)
                 with col_save:
-                    if st.form_submit_button("💾 Сохранить"):
+                    if st.form_submit_button("💾 Сохранить", use_container_width=True):
                         update_section(section_id, new_title, new_desc)
                         st.session_state["section_title"] = new_title
                         del st.session_state["editing_section"]
                         st.success("Раздел обновлен!")
                         st.rerun()
                 with col_cancel:
-                    if st.form_submit_button("❌ Отмена"):
+                    if st.form_submit_button("❌ Отмена", use_container_width=True):
                         del st.session_state["editing_section"]
                         st.rerun()
                 with col_delete:
-                    if st.form_submit_button("🗑️ Удалить раздел"):
+                    if st.form_submit_button("🗑️ Удалить", use_container_width=True):
                         delete_section(section_id)
                         del st.session_state["editing_section"]
                         del st.session_state["current_section"]
@@ -383,10 +389,10 @@ elif "current_section" in st.session_state:
                     if st.session_state.admin_logged_in:
                         col_btn1, col_btn2 = st.columns(2)
                         with col_btn1:
-                            if st.button(f"✏️ Редактировать", key=f"edit_{question['id']}"):
+                            if st.button(f"✏️ Редактировать", key=f"edit_{question['id']}", use_container_width=True):
                                 st.session_state[f"editing_{question['id']}"] = True
                         with col_btn2:
-                            if st.button(f"🗑️ Удалить", key=f"del_{question['id']}"):
+                            if st.button(f"🗑️ Удалить", key=f"del_{question['id']}", use_container_width=True):
                                 delete_question(question['id'])
                                 st.success("Вопрос удален!")
                                 st.rerun()
@@ -400,13 +406,13 @@ elif "current_section" in st.session_state:
                                 
                                 col_save, col_cancel = st.columns(2)
                                 with col_save:
-                                    if st.form_submit_button("💾 Сохранить"):
+                                    if st.form_submit_button("💾 Сохранить", use_container_width=True):
                                         update_question(question['id'], edit_q, edit_a, edit_i)
                                         del st.session_state[f"editing_{question['id']}"]
                                         st.success("Изменения сохранены!")
                                         st.rerun()
                                 with col_cancel:
-                                    if st.form_submit_button("❌ Отмена"):
+                                    if st.form_submit_button("❌ Отмена", use_container_width=True):
                                         del st.session_state[f"editing_{question['id']}"]
                                         st.rerun()
         else:
@@ -416,14 +422,55 @@ elif "current_section" in st.session_state:
 else:
     st.title("📚 База знаний для сотрудников")
     
-    # Инструкция сразу под заголовком
-    st.info(
-        "💡 **Как пользоваться базой:**\n"
-        "1. **Выберите раздел** в боковой панели слева\n"
-        "2. **Используйте поиск** для быстрого нахождения информации\n"
-        "3. **Просматривайте последние добавления** ниже\n"
-        "4. **Администратор** может редактировать разделы и вопросы"
-    )
+    # Свертываемые инструкции
+    with st.expander("📖 Инструкция по использованию", expanded=False):
+        col_user, col_admin = st.columns(2)
+        
+        with col_user:
+            st.subheader("👤 Для пользователей")
+            st.markdown("""
+            **🔍 Поиск информации:**
+            1. Введите ключевые слова в поле поиска (боковая панель)
+            2. Нажмите Enter или кнопку "Найти"
+            
+            **📂 Просмотр по разделам:**
+            1. Выберите раздел в боковой панели
+            2. Кликните на вопрос для просмотра
+            3. Используйте кнопки "Назад" для возврата
+            
+            **🎯 Быстрый доступ:**
+            - **🏠 Главная** - возврат на эту страницу
+            - **📥 Недавние** - новые разделы и вопросы ниже
+            """)
+        
+        if st.session_state.admin_logged_in:
+            with col_admin:
+                st.subheader("🔧 Для администратора")
+                st.markdown("""
+                **📁 Управление разделами:**
+                - **Создать:** Форма "Создать новый раздел" ниже
+                - **Редактировать:** Кнопка ✏️ в заголовке раздела
+                - **Удалить:** Кнопка 🗑️ в форме редактирования
+                
+                **❓ Управление вопросами:**
+                - **Добавить:** Кнопка ➕ в разделе
+                - **Редактировать:** Кнопка ✏️ под вопросом
+                - **Удалить:** Кнопка 🗑️ под вопросом
+                
+                **⚠️ Важно:**
+                - Все изменения сохраняются сразу
+                - Удаленные данные не восстанавливаются
+                - Не забывайте выходить из аккаунта 🔐
+                """)
+        else:
+            with col_admin:
+                st.subheader("🔐 Для администраторов")
+                st.info("""
+                Войдите в систему для управления базой знаний:
+                1. Введите пароль в боковой панели
+                2. Нажмите "Войти как админ"
+                3. Получите доступ к редактированию
+                """)
     
     # Быстрая статистика
     sections_count, questions_count = get_total_stats()
@@ -436,7 +483,7 @@ else:
     
     st.write("---")
     
-    # Панель админа (если вошел) - управление разделами
+    # ВОССТАНАВЛИВАЕМ ПАНЕЛЬ УПРАВЛЕНИЯ РАЗДЕЛАМИ ДЛЯ АДМИНА
     if st.session_state.admin_logged_in:
         st.subheader("🛠️ Управление разделами (админ)")
         
@@ -470,13 +517,13 @@ else:
                     q_count = len(get_questions(section['id']))
                     st.caption(f"Вопросов: {q_count}")
                 with col_edit:
-                    if st.button("✏️", key=f"edit_{section['id']}"):
+                    if st.button("✏️", key=f"edit_main_{section['id']}"):
                         st.session_state["current_section"] = section['id']
                         st.session_state["section_title"] = section['title']
                         st.session_state["editing_section"] = section['id']
                         st.rerun()
                 with col_del:
-                    if st.button("🗑️", key=f"del_{section['id']}"):
+                    if st.button("🗑️", key=f"del_main_{section['id']}"):
                         delete_section(section['id'])
                         st.success(f"Раздел '{section['title']}' удален!")
                         st.rerun()
@@ -502,7 +549,7 @@ else:
                     st.caption(f"📅 Добавлен: {format_datetime(section['created_at'])}")
                 
                 # Кнопка перехода
-                if st.button("Перейти в раздел →", key=f"go_to_{section['id']}"):
+                if st.button("Перейти в раздел →", key=f"go_to_{section['id']}", use_container_width=True):
                     st.session_state["current_section"] = section['id']
                     st.session_state["section_title"] = section['title']
                     st.rerun()
@@ -539,7 +586,9 @@ else:
                     st.caption(f"📅 Добавлен: {format_datetime(question['created_at'])}")
                 
                 # Кнопка перехода в раздел
-                if st.button(f"📂 Перейти в раздел '{question['section_title']}'", key=f"nav_q_{question['id']}"):
+                if st.button(f"📂 Перейти в раздел '{question['section_title']}'", 
+                           key=f"nav_q_{question['id']}", 
+                           use_container_width=True):
                     st.session_state["current_section"] = question['section_id']
                     st.session_state["section_title"] = question['section_title']
                     st.rerun()
